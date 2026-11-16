@@ -43,11 +43,36 @@ import java.util.HashSet;
  */
 public class FloydWarshallGUI extends JFrame {
 
+    // =====================================================================
+    //  CONSTANTS
+    // =====================================================================
+
+    // ---- algorithm limits ----
     static final long INF = Long.MAX_VALUE / 4;
     static final long MAX_ABS_WEIGHT = 1_000_000_000L;
     static final int DISPLAY_LIMIT = 30;     // matrices wider than this are not drawn
     static final int GRAPH_DRAW_LIMIT = 60;  // canvas stops drawing beyond this
     static final int GUI_MAX_VERTICES = 1000;
+
+    // ---- display symbols ----
+    private static final String INFINITY_SYMBOL = "\u221E";  // shown for "no path"
+    private static final String NO_HOP_SYMBOL = "\u00B7";    // shown for "no next hop"
+
+    // ---- colours ----
+    private static final Color COLOR_ERROR = new Color(0xB71C1C);
+    private static final Color COLOR_SUCCESS = new Color(0x1B5E20);
+    private static final Color COLOR_HEADER_CELL = new Color(0xE3E8EF);
+    private static final Color COLOR_CHANGED_CELL = new Color(0xFFE08A);
+    private static final Color COLOR_DIAGONAL_CELL = new Color(0xF2F2F2);
+    private static final Color COLOR_NEGATIVE_TEXT = new Color(0xC0392B);
+    private static final Color COLOR_NEGATIVE_DIAGONAL = new Color(0xFFB3B3);
+    private static final Color COLOR_VERTEX = new Color(0xCFE3FF);
+    private static final Color COLOR_VERTEX_CYCLE = new Color(0xFFB3B3);
+    private static final Color COLOR_VERTEX_ON_PATH = new Color(0xFFD59A);
+    private static final Color COLOR_VERTEX_OUTLINE = new Color(0x34495E);
+    private static final Color COLOR_EDGE = new Color(0x7F8C8D);
+    private static final Color COLOR_EDGE_NEGATIVE = new Color(0xC0392B);
+    private static final Color COLOR_EDGE_ON_PATH = new Color(0xE67E22);
 
     static final String RESTRICTIONS =
             "ALGORITHM RESTRICTIONS & EDGE-CASE RULES\n\n"
@@ -62,16 +87,22 @@ public class FloydWarshallGUI extends JFrame {
             + "9. Matrices wider than " + DISPLAY_LIMIT + " are not drawn; the canvas stops at "
             + GRAPH_DRAW_LIMIT + " vertices (display only, computation is unaffected).\n";
 
-    // ---- state ----
+    // =====================================================================
+    //  STATE
+    // =====================================================================
     private Graph graph = new Graph(0);
-    private Result result = null;
-    private ArrayList<Integer> highlight = new ArrayList<>();
-    private int stepIndex = 0;
-    private boolean[][] changed = new boolean[0][0];
-    private boolean sliderAdjusting = false;
+    private Result result = null;                           // null = not computed / out of date
+    private ArrayList<Integer> highlight = new ArrayList<>(); // vertices of the path being highlighted
+    private int stepIndex = 0;                              // snapshot currently shown
+    private boolean[][] changed = new boolean[0][0];        // cells changed in the current step
+    private boolean sliderAdjusting = false;                // true while code (not the user) moves the slider
     private Timer playTimer;
 
-    // ---- widgets ----
+    // =====================================================================
+    //  WIDGETS
+    // =====================================================================
+
+    // ---- graph / edge input ----
     private final JTextField nField = new JTextField("4", 5);
     private final JTextField fromField = new JTextField(4);
     private final JTextField toField = new JTextField(4);
@@ -79,33 +110,38 @@ public class FloydWarshallGUI extends JFrame {
     private final JLabel graphInfo = new JLabel();
     private final EdgeTableModel edgeModel = new EdgeTableModel();
     private final JTable edgeTable = new JTable(edgeModel);
+
+    // ---- canvas and status bar ----
     private final GraphPanel graphPanel = new GraphPanel();
     private final JLabel status = new JLabel(" ");
 
-    private final DefaultTableModel matrixModel = new DefaultTableModel() {
-        @Override public boolean isCellEditable(int r, int c) { return false; }
-    };
+    // ---- distance matrix tab ----
+    private final DefaultTableModel matrixModel = new ReadOnlyTableModel();
     private final JTable matrixTable = new JTable(matrixModel);
-    private final DefaultTableModel nextModel = new DefaultTableModel() {
-        @Override public boolean isCellEditable(int r, int c) { return false; }
-    };
-    private final JTable nextTable = new JTable(nextModel);
     private final JLabel stepLabel = new JLabel("Not computed yet - press Run.");
     private final JSlider stepSlider = new JSlider(0, 0, 0);
     private final JTextArea passLog = new JTextArea(4, 40);
     private final JButton playButton = new JButton("Play");
+
+    // ---- next-hop tab ----
+    private final DefaultTableModel nextModel = new ReadOnlyTableModel();
+    private final JTable nextTable = new JTable(nextModel);
+
+    // ---- paths tab ----
     private final JTextField qFrom = new JTextField(4);
     private final JTextField qTo = new JTextField(4);
     private final JLabel pathResult = new JLabel(" ");
     private final JTextArea allPaths = new JTextArea();
+
+    // ---- log tab ----
     private final JTextArea logArea = new JTextArea();
 
     // =====================================================================
     //  MAIN
     // =====================================================================
     public static void main(String[] args) {
-        for (String a : args) {
-            if (a.equals("--selftest")) {
+        for (String arg : args) {
+            if (arg.equals("--selftest")) {
                 String report = runAllTestsReport();
                 System.out.println(report);
                 System.exit(report.contains("FAIL") ? 1 : 0);
@@ -136,6 +172,7 @@ public class FloydWarshallGUI extends JFrame {
         status.setBorder(BorderFactory.createEmptyBorder(3, 8, 3, 8));
         add(status, BorderLayout.SOUTH);
 
+        // Auto-play: advance one pass every 700 ms until the last snapshot.
         playTimer = new Timer(700, e -> {
             if (result == null || stepIndex >= result.snapshots.size() - 1) { stopPlay(); return; }
             showStep(stepIndex + 1);
@@ -148,39 +185,57 @@ public class FloydWarshallGUI extends JFrame {
         split.setDividerLocation(360);
     }
 
+    // ---------------------------------------------------------------------
+    //  Menu bar
+    // ---------------------------------------------------------------------
     private JMenuBar buildMenuBar() {
         JMenuBar bar = new JMenuBar();
-        JMenu tests = new JMenu("Test suite");
-        for (TestCase tc : buildSuite()) {
-            JMenuItem item = new JMenuItem("Load: " + tc.name);
-            final String purpose = tc.purpose;
-            final String name = tc.name;
+        bar.add(buildTestMenu());
+        bar.add(buildHelpMenu());
+        return bar;
+    }
+
+    private JMenu buildTestMenu() {
+        JMenu menu = new JMenu("Test suite");
+
+        for (TestCase testCase : buildSuite()) {
+            JMenuItem item = new JMenuItem("Load: " + testCase.name);
+            final String name = testCase.name;
+            final String purpose = testCase.purpose;
             item.addActionListener(ev -> {
-                // rebuild so each load gets a fresh Graph object
+                // Rebuild the suite so each load gets a fresh Graph object.
                 for (TestCase fresh : buildSuite()) {
                     if (fresh.name.equals(name)) { loadGraph(fresh.graph, name + " - " + purpose); break; }
                 }
             });
-            tests.add(item);
+            menu.add(item);
         }
-        tests.addSeparator();
-        JMenuItem all = new JMenuItem("Run ALL tests (PASS/FAIL summary)...");
-        all.addActionListener(ev -> showTextDialog("Test suite results", runAllTestsReport()));
-        tests.add(all);
-        JMenuItem inv = new JMenuItem("Invalid-input validation demo...");
-        inv.addActionListener(ev -> {
+
+        menu.addSeparator();
+
+        JMenuItem runAll = new JMenuItem("Run ALL tests (PASS/FAIL summary)...");
+        runAll.addActionListener(ev -> showTextDialog("Test suite results", runAllTestsReport()));
+        menu.add(runAll);
+
+        JMenuItem invalidDemo = new JMenuItem("Invalid-input validation demo...");
+        invalidDemo.addActionListener(ev -> {
             StringBuilder sb = new StringBuilder();
             boolean ok = runInvalidInputDemo(sb);
             showTextDialog("Invalid input demo", sb + "\nRESULT: " + (ok ? "PASS" : "FAIL"));
         });
-        tests.add(inv);
+        menu.add(invalidDemo);
+        return menu;
+    }
 
-        JMenu help = new JMenu("Help");
-        JMenuItem restr = new JMenuItem("Restrictions & edge cases...");
-        restr.addActionListener(ev -> showTextDialog("Restrictions", RESTRICTIONS));
-        help.add(restr);
-        JMenuItem how = new JMenuItem("How the algorithm works...");
-        how.addActionListener(ev -> showTextDialog("Floyd-Warshall",
+    private JMenu buildHelpMenu() {
+        JMenu menu = new JMenu("Help");
+
+        JMenuItem restrictions = new JMenuItem("Restrictions & edge cases...");
+        restrictions.addActionListener(ev -> showTextDialog("Restrictions", RESTRICTIONS));
+        menu.add(restrictions);
+
+        JMenuItem howItWorks = new JMenuItem("How the algorithm works...");
+        howItWorks.addActionListener(ev -> showTextDialog("Floyd-Warshall",
                 "For every possible intermediate vertex k (in order 0..n-1), check for every pair (i, j)\n"
                 + "whether going i -> k -> j is cheaper than the best known i -> j.\n\n"
                 + "After pass k, dist[i][j] is optimal among paths that only use intermediate vertices {0..k}\n"
@@ -188,188 +243,226 @@ public class FloydWarshallGUI extends JFrame {
                 + "each pass; changed cells are highlighted.\n\n"
                 + "A next-hop matrix is kept so any path can be rebuilt using O(n^2) memory.\n"
                 + "Time O(V^3), space O(V^2). A negative diagonal entry means a negative cycle."));
-        help.add(how);
-        bar.add(tests);
-        bar.add(help);
-        return bar;
+        menu.add(howItWorks);
+        return menu;
     }
 
-    private static JPanel row(Component... cs) {
-        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
-        for (Component c : cs) p.add(c);
-        return p;
-    }
-
+    // ---------------------------------------------------------------------
+    //  Left control panel (graph, edges, run)
+    // ---------------------------------------------------------------------
     private JPanel buildControlPanel() {
         JPanel left = new JPanel();
         left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
         left.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 0));
         left.setPreferredSize(new Dimension(320, 100));
 
-        JPanel gp = titled("Graph");
-        JButton newBtn = new JButton("New graph");
-        newBtn.addActionListener(e -> createNewGraph());
-        JButton addV = new JButton("Add vertex");
-        addV.addActionListener(e -> addVertex());
-        gp.add(row(new JLabel("Vertices:"), nField, newBtn));
-        gp.add(row(addV, graphInfo));
-        left.add(gp);
-
-        JPanel ep = titled("Edges (directed)");
-        JButton addE = new JButton("Add / update");
-        addE.addActionListener(e -> addEdge());
-        JButton remE = new JButton("Remove (from,to)");
-        remE.addActionListener(e -> removeEdgeFromFields());
-        ep.add(row(new JLabel("from"), fromField, new JLabel("to"), toField, new JLabel("w"), weightField));
-        ep.add(row(addE, remE));
-        edgeTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        edgeTable.getSelectionModel().addListSelectionListener(e -> {
-            int r = edgeTable.getSelectedRow();
-            if (!e.getValueIsAdjusting() && r >= 0 && r < graph.edgeCount()) {
-                Edge ed = graph.edges().get(r);
-                fromField.setText(Integer.toString(ed.from));
-                toField.setText(Integer.toString(ed.to));
-                weightField.setText(Long.toString(ed.weight));
-            }
-        });
-        JScrollPane sp = new JScrollPane(edgeTable);
-        sp.setPreferredSize(new Dimension(280, 200));
-        ep.add(sp);
-        JLabel hint = new JLabel("<html><small>Click a row to edit it. Weight may be negative.</small></html>");
-        ep.add(row(hint));
-        left.add(ep);
-
-        JPanel rp = titled("Compute");
-        JButton run = new JButton("Run Floyd-Warshall");
-        run.setFont(run.getFont().deriveFont(Font.BOLD, 14f));
-        run.addActionListener(e -> runAlgorithm());
-        rp.add(row(run));
-        left.add(rp);
+        left.add(buildGraphSection());
+        left.add(buildEdgeSection());
+        left.add(buildComputeSection());
         left.add(Box.createVerticalGlue());
         return left;
     }
 
-    private JPanel titled(String title) {
-        JPanel p = new JPanel();
-        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
-        p.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), title,
-                TitledBorder.LEFT, TitledBorder.TOP));
-        p.setAlignmentX(Component.LEFT_ALIGNMENT);
-        return p;
+    private JPanel buildGraphSection() {
+        JPanel panel = titledPanel("Graph");
+        JButton newGraphButton = new JButton("New graph");
+        newGraphButton.addActionListener(e -> createNewGraph());
+        JButton addVertexButton = new JButton("Add vertex");
+        addVertexButton.addActionListener(e -> addVertex());
+
+        panel.add(flowRow(new JLabel("Vertices:"), nField, newGraphButton));
+        panel.add(flowRow(addVertexButton, graphInfo));
+        return panel;
     }
 
+    private JPanel buildEdgeSection() {
+        JPanel panel = titledPanel("Edges (directed)");
+        JButton addEdgeButton = new JButton("Add / update");
+        addEdgeButton.addActionListener(e -> addEdge());
+        JButton removeEdgeButton = new JButton("Remove (from,to)");
+        removeEdgeButton.addActionListener(e -> removeEdgeFromFields());
+
+        panel.add(flowRow(new JLabel("from"), fromField, new JLabel("to"), toField, new JLabel("w"), weightField));
+        panel.add(flowRow(addEdgeButton, removeEdgeButton));
+
+        // Selecting a table row copies that edge into the input boxes for editing.
+        edgeTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        edgeTable.getSelectionModel().addListSelectionListener(e -> {
+            int row = edgeTable.getSelectedRow();
+            if (!e.getValueIsAdjusting() && row >= 0 && row < graph.edgeCount()) {
+                Edge selected = graph.edges().get(row);
+                fromField.setText(Integer.toString(selected.from));
+                toField.setText(Integer.toString(selected.to));
+                weightField.setText(Long.toString(selected.weight));
+            }
+        });
+        JScrollPane tableScroll = new JScrollPane(edgeTable);
+        tableScroll.setPreferredSize(new Dimension(280, 200));
+        panel.add(tableScroll);
+
+        JLabel hint = new JLabel("<html><small>Click a row to edit it. Weight may be negative.</small></html>");
+        panel.add(flowRow(hint));
+        return panel;
+    }
+
+    private JPanel buildComputeSection() {
+        JPanel panel = titledPanel("Compute");
+        JButton runButton = new JButton("Run Floyd-Warshall");
+        runButton.setFont(runButton.getFont().deriveFont(Font.BOLD, 14f));
+        runButton.addActionListener(e -> runAlgorithm());
+        panel.add(flowRow(runButton));
+        return panel;
+    }
+
+    private JPanel titledPanel(String title) {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEtchedBorder(), title,
+                TitledBorder.LEFT, TitledBorder.TOP));
+        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return panel;
+    }
+
+    /** A left-aligned row of components. */
+    private static JPanel flowRow(Component... components) {
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+        for (Component c : components) panel.add(c);
+        return panel;
+    }
+
+    // ---------------------------------------------------------------------
+    //  Bottom tabs
+    // ---------------------------------------------------------------------
     private JTabbedPane buildTabs() {
         JTabbedPane tabs = new JTabbedPane();
 
-        // --- distance matrix tab with step controls ---
-        JPanel mp = new JPanel(new BorderLayout(4, 4));
-        styleMatrixTable(matrixTable, true);
-        mp.add(new JScrollPane(matrixTable), BorderLayout.CENTER);
-        JPanel ctl = new JPanel(new BorderLayout(4, 4));
-        JButton first = new JButton("|<");
-        JButton prev = new JButton("<");
-        JButton nextB = new JButton(">");
-        JButton last = new JButton(">|");
-        first.addActionListener(e -> { stopPlay(); showStep(0); });
-        prev.addActionListener(e -> { stopPlay(); showStep(stepIndex - 1); });
-        nextB.addActionListener(e -> { stopPlay(); showStep(stepIndex + 1); });
-        last.addActionListener(e -> {
-            stopPlay();
-            if (result != null) showStep(result.snapshots.size() - 1);
-        });
-        playButton.addActionListener(e -> togglePlay());
-        stepSlider.addChangeListener(e -> { if (!sliderAdjusting) showStep(stepSlider.getValue()); });
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        buttons.add(first); buttons.add(prev); buttons.add(nextB); buttons.add(last); buttons.add(playButton);
-        buttons.add(stepSlider);
-        buttons.add(stepLabel);
-        ctl.add(buttons, BorderLayout.NORTH);
-        passLog.setEditable(false);
-        passLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        ctl.add(new JScrollPane(passLog), BorderLayout.CENTER);
-        ctl.setPreferredSize(new Dimension(100, 140));
-        mp.add(ctl, BorderLayout.SOUTH);
-        tabs.addTab("Distance matrix (step-by-step)", mp);
+        tabs.addTab("Distance matrix (step-by-step)", buildDistanceMatrixTab());
 
-        // --- next hop tab ---
         styleMatrixTable(nextTable, false);
         tabs.addTab("Next-hop matrix", new JScrollPane(nextTable));
 
-        // --- paths tab ---
-        JPanel pp = new JPanel(new BorderLayout(4, 4));
-        JButton q = new JButton("Show path");
-        q.addActionListener(e -> queryPath());
-        JButton clear = new JButton("Clear highlight");
-        clear.addActionListener(e -> { highlight = new ArrayList<>(); graphPanel.repaint(); });
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
-        top.add(new JLabel("From:")); top.add(qFrom);
-        top.add(new JLabel("To:")); top.add(qTo);
-        top.add(q); top.add(clear); top.add(pathResult);
-        pp.add(top, BorderLayout.NORTH);
-        allPaths.setEditable(false);
-        allPaths.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        pp.add(new JScrollPane(allPaths), BorderLayout.CENTER);
-        tabs.addTab("Paths", pp);
+        tabs.addTab("Paths", buildPathsTab());
 
-        // --- log tab ---
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         tabs.addTab("Log", new JScrollPane(logArea));
         return tabs;
     }
 
-    private void styleMatrixTable(JTable t, boolean distance) {
-        t.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
-        t.setRowHeight(22);
-        t.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        t.setCellSelectionEnabled(false);
-        t.getTableHeader().setReorderingAllowed(false);
-        t.setDefaultRenderer(Object.class, new MatrixRenderer(distance));
+    private JPanel buildDistanceMatrixTab() {
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        styleMatrixTable(matrixTable, true);
+        panel.add(new JScrollPane(matrixTable), BorderLayout.CENTER);
+
+        JButton firstButton = new JButton("|<");
+        JButton previousButton = new JButton("<");
+        JButton nextButton = new JButton(">");
+        JButton lastButton = new JButton(">|");
+        firstButton.addActionListener(e -> { stopPlay(); showStep(0); });
+        previousButton.addActionListener(e -> { stopPlay(); showStep(stepIndex - 1); });
+        nextButton.addActionListener(e -> { stopPlay(); showStep(stepIndex + 1); });
+        lastButton.addActionListener(e -> {
+            stopPlay();
+            if (result != null) showStep(result.snapshots.size() - 1);
+        });
+        playButton.addActionListener(e -> togglePlay());
+        stepSlider.addChangeListener(e -> { if (!sliderAdjusting) showStep(stepSlider.getValue()); });
+
+        JPanel stepButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        stepButtons.add(firstButton);
+        stepButtons.add(previousButton);
+        stepButtons.add(nextButton);
+        stepButtons.add(lastButton);
+        stepButtons.add(playButton);
+        stepButtons.add(stepSlider);
+        stepButtons.add(stepLabel);
+
+        passLog.setEditable(false);
+        passLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+
+        JPanel stepControls = new JPanel(new BorderLayout(4, 4));
+        stepControls.add(stepButtons, BorderLayout.NORTH);
+        stepControls.add(new JScrollPane(passLog), BorderLayout.CENTER);
+        stepControls.setPreferredSize(new Dimension(100, 140));
+        panel.add(stepControls, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private JPanel buildPathsTab() {
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        JButton showPathButton = new JButton("Show path");
+        showPathButton.addActionListener(e -> queryPath());
+        JButton clearButton = new JButton("Clear highlight");
+        clearButton.addActionListener(e -> { highlight = new ArrayList<>(); graphPanel.repaint(); });
+
+        JPanel queryBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
+        queryBar.add(new JLabel("From:"));
+        queryBar.add(qFrom);
+        queryBar.add(new JLabel("To:"));
+        queryBar.add(qTo);
+        queryBar.add(showPathButton);
+        queryBar.add(clearButton);
+        queryBar.add(pathResult);
+        panel.add(queryBar, BorderLayout.NORTH);
+
+        allPaths.setEditable(false);
+        allPaths.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        panel.add(new JScrollPane(allPaths), BorderLayout.CENTER);
+        return panel;
+    }
+
+    private void styleMatrixTable(JTable table, boolean isDistanceTable) {
+        table.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+        table.setRowHeight(22);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        table.setCellSelectionEnabled(false);
+        table.getTableHeader().setReorderingAllowed(false);
+        table.setDefaultRenderer(Object.class, new MatrixRenderer(isDistanceTable));
     }
 
     // =====================================================================
-    //  ACTIONS
+    //  USER ACTIONS
     // =====================================================================
     private void createNewGraph() {
         try {
             int n = Integer.parseInt(nField.getText().trim());
             if (n < 0 || n > GUI_MAX_VERTICES) {
-                error("Vertex count must be between 0 and " + GUI_MAX_VERTICES + ".");
+                showError("Vertex count must be between 0 and " + GUI_MAX_VERTICES + ".");
                 return;
             }
             loadGraph(new Graph(n), "Created graph with " + n + " vertices and no edges.");
         } catch (NumberFormatException ex) {
-            error("'" + nField.getText().trim() + "' is not a valid whole number.");
+            showError("'" + nField.getText().trim() + "' is not a valid whole number.");
         }
     }
 
     private void addVertex() {
         if (graph.vertexCount() >= GUI_MAX_VERTICES) {
-            error("The GUI is limited to " + GUI_MAX_VERTICES + " vertices.");
+            showError("The GUI is limited to " + GUI_MAX_VERTICES + " vertices.");
             return;
         }
         graph.addVertex();
         invalidateResult();
-        ok("Added vertex " + (graph.vertexCount() - 1) + ".");
+        showInfo("Added vertex " + (graph.vertexCount() - 1) + ".");
     }
 
     private void addEdge() {
         if (graph.vertexCount() == 0) {
-            error("The graph has no vertices. Create one or add a vertex first.");
+            showError("The graph has no vertices. Create one or add a vertex first.");
             return;
         }
         try {
             int from = Integer.parseInt(fromField.getText().trim());
             int to = Integer.parseInt(toField.getText().trim());
-            long w = Long.parseLong(weightField.getText().trim());
-            boolean overwritten = graph.addOrUpdateEdge(from, to, w);
+            long weight = Long.parseLong(weightField.getText().trim());
+            boolean overwritten = graph.addOrUpdateEdge(from, to, weight);
             invalidateResult();
-            ok((overwritten ? "Updated" : "Added") + " edge " + from + " -> " + to + " (weight " + w + ")"
-                    + (w < 0 ? "  [negative weight]" : ""));
+            showInfo((overwritten ? "Updated" : "Added") + " edge " + from + " -> " + to
+                    + " (weight " + weight + ")" + (weight < 0 ? "  [negative weight]" : ""));
         } catch (NumberFormatException ex) {
-            error("from, to and weight must all be whole numbers.");
+            showError("from, to and weight must all be whole numbers.");
         } catch (IllegalArgumentException ex) {
-            error(ex.getMessage());
+            showError(ex.getMessage());
         }
     }
 
@@ -379,12 +472,12 @@ public class FloydWarshallGUI extends JFrame {
             int to = Integer.parseInt(toField.getText().trim());
             if (graph.removeEdge(from, to)) {
                 invalidateResult();
-                ok("Removed edge " + from + " -> " + to + ".");
+                showInfo("Removed edge " + from + " -> " + to + ".");
             } else {
-                error("Edge " + from + " -> " + to + " does not exist; nothing changed.");
+                showError("Edge " + from + " -> " + to + " does not exist; nothing changed.");
             }
         } catch (NumberFormatException ex) {
-            error("Enter whole numbers in the from and to boxes.");
+            showError("Enter whole numbers in the from and to boxes.");
         }
     }
 
@@ -395,7 +488,7 @@ public class FloydWarshallGUI extends JFrame {
             result = FloydWarshall.run(graph, true);
         } catch (OutOfMemoryError oom) {
             result = null;
-            error("Not enough memory for n x n matrices with n = " + graph.vertexCount() + ".");
+            showError("Not enough memory for n x n matrices with n = " + graph.vertexCount() + ".");
             return;
         } finally {
             setCursor(Cursor.getDefaultCursor());
@@ -405,15 +498,15 @@ public class FloydWarshallGUI extends JFrame {
     }
 
     private void queryPath() {
-        if (result == null) { error("No up-to-date result. Press Run first."); return; }
-        if (graph.vertexCount() == 0) { error("The graph is empty; there are no paths."); return; }
-        if (result.negativeCycle) { error("A negative cycle was found, so shortest paths are undefined."); return; }
+        if (result == null) { showError("No up-to-date result. Press Run first."); return; }
+        if (graph.vertexCount() == 0) { showError("The graph is empty; there are no paths."); return; }
+        if (result.negativeCycle) { showError("A negative cycle was found, so shortest paths are undefined."); return; }
         try {
             int from = Integer.parseInt(qFrom.getText().trim());
             int to = Integer.parseInt(qTo.getText().trim());
-            int max = graph.vertexCount() - 1;
-            if (from < 0 || from > max || to < 0 || to > max) {
-                error("Vertices must be in 0.." + max + ".");
+            int maxVertex = graph.vertexCount() - 1;
+            if (from < 0 || from > maxVertex || to < 0 || to > maxVertex) {
+                showError("Vertices must be in 0.." + maxVertex + ".");
                 return;
             }
             pathResult.setText(describePath(result, graph, from, to));
@@ -421,154 +514,19 @@ public class FloydWarshallGUI extends JFrame {
             graphPanel.repaint();
             status.setText(" ");
         } catch (NumberFormatException ex) {
-            error("Enter whole numbers for source and target.");
+            showError("Enter whole numbers for source and target.");
         }
     }
 
-    private void loadGraph(Graph g, String message) {
-        graph = g;
-        nField.setText(Integer.toString(g.vertexCount()));
+    private void loadGraph(Graph newGraph, String message) {
+        graph = newGraph;
+        nField.setText(Integer.toString(newGraph.vertexCount()));
         graphPanel.resetLayout();
         invalidateResult();
-        ok(message);
+        showInfo(message);
     }
 
-    // =====================================================================
-    //  VIEW UPDATES
-    // =====================================================================
-    private void invalidateResult() {
-        stopPlay();
-        result = null;
-        highlight = new ArrayList<>();
-        matrixModel.setDataVector(new Object[0][0], new Object[0]);
-        nextModel.setDataVector(new Object[0][0], new Object[0]);
-        changed = new boolean[0][0];
-        sliderAdjusting = true;
-        stepSlider.setMaximum(0);
-        stepSlider.setValue(0);
-        stepSlider.setEnabled(false);
-        sliderAdjusting = false;
-        stepLabel.setForeground(UIManager.getColor("Label.foreground"));
-        stepLabel.setText("Not computed yet - press Run.");
-        passLog.setText("");
-        allPaths.setText("");
-        pathResult.setText(" ");
-        logArea.setText("");
-        graphInfo.setText(graph.vertexCount() + " vertices, " + graph.edgeCount() + " edges");
-        edgeModel.fireTableDataChanged();
-        graphPanel.repaint();
-    }
-
-    private void showResult() {
-        Result r = result;
-        graphInfo.setText(graph.vertexCount() + " vertices, " + graph.edgeCount() + " edges");
-        logArea.setText(r.log.toString());
-        int n = graph.vertexCount();
-
-        if (n == 0) {
-            stepLabel.setText("Empty graph - nothing to compute.");
-            status.setForeground(new Color(0x1B5E20));
-            status.setText("Edge case: 0 vertices, nothing to compute.");
-            graphPanel.repaint();
-            return;
-        }
-        if (r.snapshots.isEmpty()) {
-            stepLabel.setText("Matrices wider than " + DISPLAY_LIMIT + " are not shown; use the Paths tab.");
-            matrixModel.setDataVector(new Object[0][0], new Object[0]);
-            nextModel.setDataVector(new Object[0][0], new Object[0]);
-        } else {
-            sliderAdjusting = true;
-            stepSlider.setEnabled(true);
-            stepSlider.setMaximum(r.snapshots.size() - 1);
-            sliderAdjusting = false;
-            showStep(r.snapshots.size() - 1);
-        }
-
-        if (r.negativeCycle) {
-            status.setForeground(new Color(0xB71C1C));
-            status.setText("NEGATIVE CYCLE detected through vertex " + r.cycleVertex
-                    + (r.detectedAtPass >= 0 ? " after pass k = " + r.detectedAtPass : " (negative self-loop)")
-                    + ". Shortest paths are undefined.");
-            allPaths.setText("A negative cycle was found; shortest paths are undefined.");
-        } else {
-            status.setForeground(new Color(0x1B5E20));
-            status.setText("Done. No negative cycle. " + r.updates + " shorter routes found.");
-            fillNextTable(r);
-            if (n <= 40) {
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < n; i++)
-                    for (int j = 0; j < n; j++)
-                        if (i != j) sb.append(describePath(r, graph, i, j)).append('\n');
-                allPaths.setText(sb.toString());
-                allPaths.setCaretPosition(0);
-            } else {
-                allPaths.setText("Graph has more than 40 vertices; use the query boxes above.");
-            }
-        }
-        graphPanel.repaint();
-    }
-
-    private void showStep(int idx) {
-        if (result == null || result.snapshots.isEmpty()) return;
-        idx = Math.max(0, Math.min(idx, result.snapshots.size() - 1));
-        stepIndex = idx;
-        long[][] cur = result.snapshots.get(idx);
-        long[][] prev = idx > 0 ? result.snapshots.get(idx - 1) : null;
-        int n = cur.length;
-        changed = new boolean[n][n];
-        if (prev != null) {
-            for (int i = 0; i < n; i++)
-                for (int j = 0; j < n; j++) changed[i][j] = cur[i][j] != prev[i][j];
-        }
-        String[] cols = new String[n + 1];
-        cols[0] = "from \\ to";
-        for (int j = 0; j < n; j++) cols[j + 1] = Integer.toString(j);
-        Object[][] data = new Object[n][n + 1];
-        for (int i = 0; i < n; i++) {
-            data[i][0] = Integer.toString(i);
-            for (int j = 0; j < n; j++) data[i][j + 1] = cur[i][j] == INF ? "\u221E" : Long.toString(cur[i][j]);
-        }
-        matrixModel.setDataVector(data, cols);
-        sizeColumns(matrixTable, 56);
-
-        sliderAdjusting = true;
-        stepSlider.setValue(idx);
-        sliderAdjusting = false;
-
-        boolean lastNeg = result.negativeCycle && idx == result.snapshots.size() - 1;
-        String label = (idx == 0) ? "D(-1): initial (direct edges)" : "after pass k = " + (idx - 1)
-                + "  (" + idx + "/" + (result.snapshots.size() - 1) + ")";
-        if (lastNeg) label += "  - NEGATIVE CYCLE";
-        stepLabel.setText(label);
-        stepLabel.setForeground(lastNeg ? new Color(0xB71C1C) : UIManager.getColor("Label.foreground"));
-
-        StringBuilder sb = new StringBuilder();
-        for (String s : result.passLogs.get(idx)) sb.append(s).append('\n');
-        passLog.setText(sb.toString());
-        passLog.setCaretPosition(0);
-    }
-
-    private void fillNextTable(Result r) {
-        int n = r.next.length;
-        if (n > DISPLAY_LIMIT) { nextModel.setDataVector(new Object[0][0], new Object[0]); return; }
-        String[] cols = new String[n + 1];
-        cols[0] = "from \\ to";
-        for (int j = 0; j < n; j++) cols[j + 1] = Integer.toString(j);
-        Object[][] data = new Object[n][n + 1];
-        for (int i = 0; i < n; i++) {
-            data[i][0] = Integer.toString(i);
-            for (int j = 0; j < n; j++) data[i][j + 1] = r.next[i][j] < 0 ? "\u00B7" : Integer.toString(r.next[i][j]);
-        }
-        nextModel.setDataVector(data, cols);
-        sizeColumns(nextTable, 56);
-    }
-
-    private void sizeColumns(JTable t, int w) {
-        for (int c = 0; c < t.getColumnCount(); c++) {
-            t.getColumnModel().getColumn(c).setPreferredWidth(c == 0 ? 80 : w);
-        }
-    }
-
+    // ---- auto-play ----
     private void togglePlay() {
         if (playTimer.isRunning()) { stopPlay(); return; }
         if (result == null || result.snapshots.isEmpty()) return;
@@ -582,65 +540,262 @@ public class FloydWarshallGUI extends JFrame {
         playButton.setText("Play");
     }
 
-    private void error(String msg) {
-        status.setForeground(new Color(0xB71C1C));
-        status.setText("[Invalid] " + msg);
+    // =====================================================================
+    //  VIEW UPDATES
+    // =====================================================================
+
+    /** Clears everything derived from a previous run (called whenever the graph changes). */
+    private void invalidateResult() {
+        stopPlay();
+        result = null;
+        highlight = new ArrayList<>();
+        matrixModel.setDataVector(new Object[0][0], new Object[0]);
+        nextModel.setDataVector(new Object[0][0], new Object[0]);
+        changed = new boolean[0][0];
+
+        sliderAdjusting = true;
+        stepSlider.setMaximum(0);
+        stepSlider.setValue(0);
+        stepSlider.setEnabled(false);
+        sliderAdjusting = false;
+
+        stepLabel.setForeground(defaultLabelColor());
+        stepLabel.setText("Not computed yet - press Run.");
+        passLog.setText("");
+        allPaths.setText("");
+        pathResult.setText(" ");
+        logArea.setText("");
+        refreshGraphInfo();
+        edgeModel.fireTableDataChanged();
+        graphPanel.repaint();
+    }
+
+    /** Fills every output widget after a run. */
+    private void showResult() {
+        Result r = result;
+        refreshGraphInfo();
+        logArea.setText(r.log.toString());
+        int n = graph.vertexCount();
+
+        // EDGE CASE: nothing to show for an empty graph.
+        if (n == 0) {
+            stepLabel.setText("Empty graph - nothing to compute.");
+            status.setForeground(COLOR_SUCCESS);
+            status.setText("Edge case: 0 vertices, nothing to compute.");
+            graphPanel.repaint();
+            return;
+        }
+
+        showFinalSnapshot(r);
+
+        if (r.negativeCycle) {
+            status.setForeground(COLOR_ERROR);
+            status.setText("NEGATIVE CYCLE detected through vertex " + r.cycleVertex
+                    + (r.detectedAtPass >= 0 ? " after pass k = " + r.detectedAtPass : " (negative self-loop)")
+                    + ". Shortest paths are undefined.");
+            allPaths.setText("A negative cycle was found; shortest paths are undefined.");
+        } else {
+            status.setForeground(COLOR_SUCCESS);
+            status.setText("Done. No negative cycle. " + r.updates + " shorter routes found.");
+            fillNextTable(r);
+            fillAllPathsList(r, n);
+        }
+        graphPanel.repaint();
+    }
+
+    /** Jumps the step viewer to the last snapshot, or explains why no matrix is drawn. */
+    private void showFinalSnapshot(Result r) {
+        if (r.snapshots.isEmpty()) {
+            stepLabel.setText("Matrices wider than " + DISPLAY_LIMIT + " are not shown; use the Paths tab.");
+            matrixModel.setDataVector(new Object[0][0], new Object[0]);
+            nextModel.setDataVector(new Object[0][0], new Object[0]);
+            return;
+        }
+        sliderAdjusting = true;
+        stepSlider.setEnabled(true);
+        stepSlider.setMaximum(r.snapshots.size() - 1);
+        sliderAdjusting = false;
+        showStep(r.snapshots.size() - 1);
+    }
+
+    private void fillAllPathsList(Result r, int n) {
+        if (n > 40) {
+            allPaths.setText("Graph has more than 40 vertices; use the query boxes above.");
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                if (i != j) sb.append(describePath(r, graph, i, j)).append('\n');
+        allPaths.setText(sb.toString());
+        allPaths.setCaretPosition(0);
+    }
+
+    /** Displays snapshot {@code index}: D(-1) is the initial matrix, index k+1 is the state after pass k. */
+    private void showStep(int index) {
+        if (result == null || result.snapshots.isEmpty()) return;
+        index = Math.max(0, Math.min(index, result.snapshots.size() - 1));
+        stepIndex = index;
+
+        long[][] current = result.snapshots.get(index);
+        long[][] previous = index > 0 ? result.snapshots.get(index - 1) : null;
+        int n = current.length;
+
+        // Remember which cells differ from the previous snapshot so the renderer can highlight them.
+        changed = new boolean[n][n];
+        if (previous != null) {
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++) changed[i][j] = current[i][j] != previous[i][j];
+        }
+
+        Object[][] data = new Object[n][n + 1];
+        for (int i = 0; i < n; i++) {
+            data[i][0] = Integer.toString(i);
+            for (int j = 0; j < n; j++) {
+                data[i][j + 1] = current[i][j] == INF ? INFINITY_SYMBOL : Long.toString(current[i][j]);
+            }
+        }
+        matrixModel.setDataVector(data, matrixColumnNames(n));
+        sizeColumns(matrixTable, 56);
+
+        sliderAdjusting = true;
+        stepSlider.setValue(index);
+        sliderAdjusting = false;
+
+        boolean isNegativeCycleStep = result.negativeCycle && index == result.snapshots.size() - 1;
+        String label = (index == 0)
+                ? "D(-1): initial (direct edges)"
+                : "after pass k = " + (index - 1) + "  (" + index + "/" + (result.snapshots.size() - 1) + ")";
+        if (isNegativeCycleStep) label += "  - NEGATIVE CYCLE";
+        stepLabel.setText(label);
+        stepLabel.setForeground(isNegativeCycleStep ? COLOR_ERROR : defaultLabelColor());
+
+        StringBuilder sb = new StringBuilder();
+        for (String line : result.passLogs.get(index)) sb.append(line).append('\n');
+        passLog.setText(sb.toString());
+        passLog.setCaretPosition(0);
+    }
+
+    private void fillNextTable(Result r) {
+        int n = r.next.length;
+        if (n > DISPLAY_LIMIT) { nextModel.setDataVector(new Object[0][0], new Object[0]); return; }
+
+        Object[][] data = new Object[n][n + 1];
+        for (int i = 0; i < n; i++) {
+            data[i][0] = Integer.toString(i);
+            for (int j = 0; j < n; j++) {
+                data[i][j + 1] = r.next[i][j] < 0 ? NO_HOP_SYMBOL : Integer.toString(r.next[i][j]);
+            }
+        }
+        nextModel.setDataVector(data, matrixColumnNames(n));
+        sizeColumns(nextTable, 56);
+    }
+
+    /** Header row for an n x n matrix table: "from \ to", 0, 1, ..., n-1. */
+    private static String[] matrixColumnNames(int n) {
+        String[] columns = new String[n + 1];
+        columns[0] = "from \\ to";
+        for (int j = 0; j < n; j++) columns[j + 1] = Integer.toString(j);
+        return columns;
+    }
+
+    private void sizeColumns(JTable table, int width) {
+        for (int c = 0; c < table.getColumnCount(); c++) {
+            table.getColumnModel().getColumn(c).setPreferredWidth(c == 0 ? 80 : width);
+        }
+    }
+
+    private void refreshGraphInfo() {
+        graphInfo.setText(graph.vertexCount() + " vertices, " + graph.edgeCount() + " edges");
+    }
+
+    // ---- status bar and dialogs ----
+    private void showError(String message) {
+        status.setForeground(COLOR_ERROR);
+        status.setText("[Invalid] " + message);
         Toolkit.getDefaultToolkit().beep();
     }
 
-    private void ok(String msg) {
-        status.setForeground(UIManager.getColor("Label.foreground"));
-        status.setText(msg);
+    private void showInfo(String message) {
+        status.setForeground(defaultLabelColor());
+        status.setText(message);
+    }
+
+    private static Color defaultLabelColor() {
+        return UIManager.getColor("Label.foreground");
     }
 
     private void showTextDialog(String title, String text) {
-        JTextArea ta = new JTextArea(text);
-        ta.setEditable(false);
-        ta.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        ta.setCaretPosition(0);
-        JScrollPane sp = new JScrollPane(ta);
-        sp.setPreferredSize(new Dimension(720, 420));
-        JOptionPane.showMessageDialog(this, sp, title, JOptionPane.PLAIN_MESSAGE);
+        JTextArea textArea = new JTextArea(text);
+        textArea.setEditable(false);
+        textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        textArea.setCaretPosition(0);
+        JScrollPane scroll = new JScrollPane(textArea);
+        scroll.setPreferredSize(new Dimension(720, 420));
+        JOptionPane.showMessageDialog(this, scroll, title, JOptionPane.PLAIN_MESSAGE);
     }
 
     // =====================================================================
     //  TABLE PIECES
     // =====================================================================
+
+    /** Table model whose cells cannot be edited. */
+    private static final class ReadOnlyTableModel extends DefaultTableModel {
+        @Override public boolean isCellEditable(int row, int column) { return false; }
+    }
+
+    /** Read-only view of the graph's edge list (From, To, Weight). */
     private final class EdgeTableModel extends AbstractTableModel {
-        private final String[] names = {"From", "To", "Weight"};
+        private final String[] columnNames = {"From", "To", "Weight"};
+
         @Override public int getRowCount() { return graph.edgeCount(); }
         @Override public int getColumnCount() { return 3; }
-        @Override public String getColumnName(int c) { return names[c]; }
-        @Override public Object getValueAt(int r, int c) {
-            Edge e = graph.edges().get(r);
-            return c == 0 ? e.from : c == 1 ? e.to : e.weight;
+        @Override public String getColumnName(int column) { return columnNames[column]; }
+
+        @Override public Object getValueAt(int row, int column) {
+            Edge edge = graph.edges().get(row);
+            return column == 0 ? edge.from : column == 1 ? edge.to : edge.weight;
         }
     }
 
+    /** Colours matrix cells: header column, changed cells, diagonal, negative values, INF / no-hop. */
     private final class MatrixRenderer extends DefaultTableCellRenderer {
-        private final boolean distance;
-        MatrixRenderer(boolean distance) { this.distance = distance; setHorizontalAlignment(CENTER); }
+        private final boolean isDistanceTable;
+
+        MatrixRenderer(boolean isDistanceTable) {
+            this.isDistanceTable = isDistanceTable;
+            setHorizontalAlignment(CENTER);
+        }
 
         @Override
-        public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean foc, int row, int col) {
-            super.getTableCellRendererComponent(t, v, false, false, row, col);
-            String s = v == null ? "" : v.toString();
-            setFont(t.getFont());
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean selected,
+                                                       boolean focused, int row, int col) {
+            super.getTableCellRendererComponent(table, value, false, false, row, col);
+            String text = value == null ? "" : value.toString();
+            setFont(table.getFont());
             setForeground(Color.BLACK);
             setBackground(Color.WHITE);
+
+            int matrixCol = col - 1;   // column 0 is the row-header column
+            boolean isChangedCell = isDistanceTable && row < changed.length
+                    && matrixCol < changed.length && changed[row][matrixCol];
+
+            // Background / font
             if (col == 0) {
-                setBackground(new Color(0xE3E8EF));
-                setFont(t.getFont().deriveFont(Font.BOLD));
-            } else if (distance && row < changed.length && col - 1 < changed.length && changed[row][col - 1]) {
-                setBackground(new Color(0xFFE08A));
-                setFont(t.getFont().deriveFont(Font.BOLD));
-            } else if (row == col - 1) {
-                setBackground(new Color(0xF2F2F2));
+                setBackground(COLOR_HEADER_CELL);
+                setFont(table.getFont().deriveFont(Font.BOLD));
+            } else if (isChangedCell) {
+                setBackground(COLOR_CHANGED_CELL);
+                setFont(table.getFont().deriveFont(Font.BOLD));
+            } else if (row == matrixCol) {
+                setBackground(COLOR_DIAGONAL_CELL);
             }
+
+            // Text colour (and negative-diagonal override)
             if (col > 0) {
-                if (s.equals("\u221E") || s.equals("\u00B7")) setForeground(Color.GRAY);
-                else if (distance && s.startsWith("-")) setForeground(new Color(0xC0392B));
-                if (distance && row == col - 1 && s.startsWith("-")) setBackground(new Color(0xFFB3B3));
+                if (text.equals(INFINITY_SYMBOL) || text.equals(NO_HOP_SYMBOL)) setForeground(Color.GRAY);
+                else if (isDistanceTable && text.startsWith("-")) setForeground(COLOR_NEGATIVE_TEXT);
+                if (isDistanceTable && row == matrixCol && text.startsWith("-")) setBackground(COLOR_NEGATIVE_DIAGONAL);
             }
             return this;
         }
@@ -650,49 +805,54 @@ public class FloydWarshallGUI extends JFrame {
     //  GRAPH CANVAS
     // =====================================================================
     private final class GraphPanel extends JPanel {
-        private static final int R = 18;
+        private static final int R = 18;          // vertex radius in pixels
+        private static final int MARGIN = 40;     // space kept free around the drawing area
+
+        /** Vertex positions as fractions (0..1) of the drawing area. */
         private double[][] pos = new double[0][2];
         private int dragging = -1;
 
         GraphPanel() {
             setBackground(Color.WHITE);
             setBorder(BorderFactory.createTitledBorder("Graph  (drag vertices to rearrange)"));
-            MouseAdapter ma = new MouseAdapter() {
-                @Override public void mousePressed(MouseEvent e) { dragging = hit(e.getX(), e.getY()); }
+            MouseAdapter mouseHandler = new MouseAdapter() {
+                @Override public void mousePressed(MouseEvent e) { dragging = vertexAt(e.getX(), e.getY()); }
                 @Override public void mouseReleased(MouseEvent e) { dragging = -1; }
                 @Override public void mouseDragged(MouseEvent e) {
                     if (dragging < 0 || dragging >= pos.length) return;
-                    int w = Math.max(1, getWidth() - 80), h = Math.max(1, getHeight() - 80);
-                    pos[dragging][0] = Math.min(1, Math.max(0, (e.getX() - 40) / (double) w));
-                    pos[dragging][1] = Math.min(1, Math.max(0, (e.getY() - 40) / (double) h));
+                    int w = Math.max(1, getWidth() - 2 * MARGIN), h = Math.max(1, getHeight() - 2 * MARGIN);
+                    pos[dragging][0] = Math.min(1, Math.max(0, (e.getX() - MARGIN) / (double) w));
+                    pos[dragging][1] = Math.min(1, Math.max(0, (e.getY() - MARGIN) / (double) h));
                     repaint();
                 }
             };
-            addMouseListener(ma);
-            addMouseMotionListener(ma);
+            addMouseListener(mouseHandler);
+            addMouseMotionListener(mouseHandler);
         }
 
         void resetLayout() { pos = new double[0][2]; }
 
+        /** Places vertices evenly on a circle (only when the vertex count has changed). */
         private void ensureLayout(int n) {
             if (pos.length == n) return;
             pos = new double[n][2];
             for (int i = 0; i < n; i++) {
-                double a = 2 * Math.PI * i / Math.max(1, n) - Math.PI / 2;
-                pos[i][0] = n == 1 ? 0.5 : 0.5 + 0.5 * Math.cos(a);
-                pos[i][1] = n == 1 ? 0.5 : 0.5 + 0.5 * Math.sin(a);
+                double angle = 2 * Math.PI * i / Math.max(1, n) - Math.PI / 2;
+                pos[i][0] = n == 1 ? 0.5 : 0.5 + 0.5 * Math.cos(angle);
+                pos[i][1] = n == 1 ? 0.5 : 0.5 + 0.5 * Math.sin(angle);
             }
         }
 
-        private Point2D.Double px(int i) {
-            int w = Math.max(1, getWidth() - 80), h = Math.max(1, getHeight() - 80);
-            return new Point2D.Double(40 + pos[i][0] * w, 40 + pos[i][1] * h);
+        /** Converts a vertex's fractional position to pixel coordinates. */
+        private Point2D.Double toPixel(int vertex) {
+            int w = Math.max(1, getWidth() - 2 * MARGIN), h = Math.max(1, getHeight() - 2 * MARGIN);
+            return new Point2D.Double(MARGIN + pos[vertex][0] * w, MARGIN + pos[vertex][1] * h);
         }
 
-        private int hit(int x, int y) {
+        /** @return the vertex under the pixel (x, y), or -1 if none. Later vertices are drawn on top. */
+        private int vertexAt(int x, int y) {
             for (int i = pos.length - 1; i >= 0; i--) {
-                Point2D.Double p = px(i);
-                if (p.distance(x, y) <= R) return i;
+                if (toPixel(i).distance(x, y) <= R) return i;
             }
             return -1;
         }
@@ -703,90 +863,124 @@ public class FloydWarshallGUI extends JFrame {
             Graphics2D g = (Graphics2D) g0;
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
             int n = graph.vertexCount();
-            if (n == 0) { centered(g, "Empty graph - create vertices on the left."); return; }
+            if (n == 0) { drawCenteredMessage(g, "Empty graph - create vertices on the left."); return; }
             if (n > GRAPH_DRAW_LIMIT) {
-                centered(g, "Graph has " + n + " vertices (drawing limit " + GRAPH_DRAW_LIMIT + "). Computation still works.");
+                drawCenteredMessage(g, "Graph has " + n + " vertices (drawing limit " + GRAPH_DRAW_LIMIT
+                        + "). Computation still works.");
                 return;
             }
             ensureLayout(n);
 
+            // Edges first, so vertices are painted on top of them.
             HashSet<Long> pathEdges = new HashSet<>();
-            for (int i = 0; i + 1 < highlight.size(); i++) pathEdges.add((long) highlight.get(i) * 100000L + highlight.get(i + 1));
-
+            for (int i = 0; i + 1 < highlight.size(); i++) {
+                pathEdges.add(edgeKey(highlight.get(i), highlight.get(i + 1)));
+            }
             g.setFont(getFont().deriveFont(Font.BOLD, 12f));
-            for (Edge e : graph.edges()) {
-                boolean hl = pathEdges.contains((long) e.from * 100000L + e.to);
-                drawEdge(g, e, hl);
+            for (Edge edge : graph.edges()) {
+                drawEdge(g, edge, pathEdges.contains(edgeKey(edge.from, edge.to)));
             }
-            HashSet<Integer> onPath = new HashSet<>(highlight);
+
             g.setFont(getFont().deriveFont(Font.BOLD, 13f));
-            for (int i = 0; i < n; i++) {
-                Point2D.Double p = px(i);
-                Color fill = new Color(0xCFE3FF);
-                if (result != null && result.negativeCycle && i == result.cycleVertex) fill = new Color(0xFFB3B3);
-                else if (onPath.contains(i)) fill = new Color(0xFFD59A);
-                g.setColor(fill);
-                g.fill(new Ellipse2D.Double(p.x - R, p.y - R, 2 * R, 2 * R));
-                g.setColor(new Color(0x34495E));
-                g.setStroke(new BasicStroke(2f));
-                g.draw(new Ellipse2D.Double(p.x - R, p.y - R, 2 * R, 2 * R));
-                String s = Integer.toString(i);
-                FontMetrics fm = g.getFontMetrics();
-                g.drawString(s, (float) (p.x - fm.stringWidth(s) / 2.0), (float) (p.y + fm.getAscent() / 2.0 - 2));
-            }
+            HashSet<Integer> onPath = new HashSet<>(highlight);
+            for (int i = 0; i < n; i++) drawVertex(g, i, onPath.contains(i));
         }
 
-        private void centered(Graphics2D g, String msg) {
+        /** Unique key for a directed (from, to) pair, used to look up highlighted edges. */
+        private long edgeKey(int from, int to) {
+            return (long) from * 100000L + to;
+        }
+
+        private void drawCenteredMessage(Graphics2D g, String message) {
             g.setColor(Color.GRAY);
             FontMetrics fm = g.getFontMetrics();
-            g.drawString(msg, (getWidth() - fm.stringWidth(msg)) / 2, getHeight() / 2);
+            g.drawString(message, (getWidth() - fm.stringWidth(message)) / 2, getHeight() / 2);
         }
 
-        private void drawEdge(Graphics2D g, Edge e, boolean hl) {
-            Color c = hl ? new Color(0xE67E22) : e.weight < 0 ? new Color(0xC0392B) : new Color(0x7F8C8D);
-            g.setColor(c);
-            g.setStroke(new BasicStroke(hl ? 3.2f : 1.6f));
-            Point2D.Double a = px(e.from);
-            if (e.from == e.to) {
-                double cx = getWidth() / 2.0, cy = getHeight() / 2.0;
-                double ux = a.x - cx, uy = a.y - cy;
-                double len = Math.hypot(ux, uy);
-                if (len < 1) { ux = 0; uy = -1; } else { ux /= len; uy /= len; }
-                double lx = a.x + ux * (R + 8), ly = a.y + uy * (R + 8);
-                g.draw(new Ellipse2D.Double(lx - 12, ly - 12, 24, 24));
-                label(g, Long.toString(e.weight), lx + ux * 22, ly + uy * 22, c);
-                return;
-            }
-            Point2D.Double b = px(e.to);
+        private void drawVertex(Graphics2D g, int vertex, boolean onPath) {
+            Point2D.Double p = toPixel(vertex);
+            Color fill = COLOR_VERTEX;
+            if (result != null && result.negativeCycle && vertex == result.cycleVertex) fill = COLOR_VERTEX_CYCLE;
+            else if (onPath) fill = COLOR_VERTEX_ON_PATH;
+
+            g.setColor(fill);
+            g.fill(new Ellipse2D.Double(p.x - R, p.y - R, 2 * R, 2 * R));
+            g.setColor(COLOR_VERTEX_OUTLINE);
+            g.setStroke(new BasicStroke(2f));
+            g.draw(new Ellipse2D.Double(p.x - R, p.y - R, 2 * R, 2 * R));
+
+            String text = Integer.toString(vertex);
+            FontMetrics fm = g.getFontMetrics();
+            g.drawString(text, (float) (p.x - fm.stringWidth(text) / 2.0), (float) (p.y + fm.getAscent() / 2.0 - 2));
+        }
+
+        private void drawEdge(Graphics2D g, Edge edge, boolean onPath) {
+            Color color = onPath ? COLOR_EDGE_ON_PATH : edge.weight < 0 ? COLOR_EDGE_NEGATIVE : COLOR_EDGE;
+            g.setColor(color);
+            g.setStroke(new BasicStroke(onPath ? 3.2f : 1.6f));
+
+            if (edge.from == edge.to) drawSelfLoop(g, edge, color);
+            else drawCurvedEdge(g, edge, color);
+        }
+
+        /** Draws a small circle pointing away from the canvas centre, with the weight beside it. */
+        private void drawSelfLoop(Graphics2D g, Edge edge, Color color) {
+            Point2D.Double a = toPixel(edge.from);
+            double centreX = getWidth() / 2.0, centreY = getHeight() / 2.0;
+            double ux = a.x - centreX, uy = a.y - centreY;
+            double length = Math.hypot(ux, uy);
+            if (length < 1) { ux = 0; uy = -1; } else { ux /= length; uy /= length; }
+
+            double loopX = a.x + ux * (R + 8), loopY = a.y + uy * (R + 8);
+            g.draw(new Ellipse2D.Double(loopX - 12, loopY - 12, 24, 24));
+            drawWeightLabel(g, Long.toString(edge.weight), loopX + ux * 22, loopY + uy * 22, color);
+        }
+
+        /** Draws a quadratic curve from one vertex to another, with an arrowhead and weight label. */
+        private void drawCurvedEdge(Graphics2D g, Edge edge, Color color) {
+            Point2D.Double a = toPixel(edge.from);
+            Point2D.Double b = toPixel(edge.to);
             double dx = b.x - a.x, dy = b.y - a.y;
-            double len = Math.hypot(dx, dy);
-            if (len < 1) return;
-            double mx = (a.x + b.x) / 2 - dy / len * 44, my = (a.y + b.y) / 2 + dx / len * 44;
-            double sx = mx - a.x, sy = my - a.y, sl = Math.hypot(sx, sy);
-            double ex = mx - b.x, ey = my - b.y, el = Math.hypot(ex, ey);
-            double x1 = a.x + sx / sl * R, y1 = a.y + sy / sl * R;
-            double x2 = b.x + ex / el * (R + 2), y2 = b.y + ey / el * (R + 2);
-            g.draw(new QuadCurve2D.Double(x1, y1, mx, my, x2, y2));
-            double ang = Math.atan2(y2 - my, x2 - mx);
+            double length = Math.hypot(dx, dy);
+            if (length < 1) return;
+
+            // Control point: midpoint pushed 44 px sideways so opposite edges do not overlap.
+            double controlX = (a.x + b.x) / 2 - dy / length * 44;
+            double controlY = (a.y + b.y) / 2 + dx / length * 44;
+
+            // Start / end points sit on the vertex circles, along the line to the control point.
+            double startDx = controlX - a.x, startDy = controlY - a.y, startLen = Math.hypot(startDx, startDy);
+            double endDx = controlX - b.x, endDy = controlY - b.y, endLen = Math.hypot(endDx, endDy);
+            double x1 = a.x + startDx / startLen * R, y1 = a.y + startDy / startLen * R;
+            double x2 = b.x + endDx / endLen * (R + 2), y2 = b.y + endDy / endLen * (R + 2);
+            g.draw(new QuadCurve2D.Double(x1, y1, controlX, controlY, x2, y2));
+
+            // Arrowhead at the target end.
+            double angle = Math.atan2(y2 - controlY, x2 - controlX);
             Path2D.Double head = new Path2D.Double();
             head.moveTo(x2, y2);
-            head.lineTo(x2 - 11 * Math.cos(ang - 0.4), y2 - 11 * Math.sin(ang - 0.4));
-            head.lineTo(x2 - 11 * Math.cos(ang + 0.4), y2 - 11 * Math.sin(ang + 0.4));
+            head.lineTo(x2 - 11 * Math.cos(angle - 0.4), y2 - 11 * Math.sin(angle - 0.4));
+            head.lineTo(x2 - 11 * Math.cos(angle + 0.4), y2 - 11 * Math.sin(angle + 0.4));
             head.closePath();
             g.fill(head);
-            label(g, Long.toString(e.weight), 0.25 * x1 + 0.5 * mx + 0.25 * x2, 0.25 * y1 + 0.5 * my + 0.25 * y2, c);
+
+            // Weight label at the curve's midpoint (t = 0.5 of the quadratic Bezier).
+            drawWeightLabel(g, Long.toString(edge.weight),
+                    0.25 * x1 + 0.5 * controlX + 0.25 * x2,
+                    0.25 * y1 + 0.5 * controlY + 0.25 * y2, color);
         }
 
-        private void label(Graphics2D g, String s, double x, double y, Color c) {
+        private void drawWeightLabel(Graphics2D g, String text, double x, double y, Color color) {
             FontMetrics fm = g.getFontMetrics();
-            int w = fm.stringWidth(s) + 8, h = fm.getHeight();
+            int w = fm.stringWidth(text) + 8, h = fm.getHeight();
             g.setColor(new Color(255, 255, 255, 230));
             g.fillRoundRect((int) (x - w / 2.0), (int) (y - h / 2.0), w, h, 8, 8);
-            g.setColor(c);
+            g.setColor(color);
             g.setStroke(new BasicStroke(1f));
             g.drawRoundRect((int) (x - w / 2.0), (int) (y - h / 2.0), w, h, 8, 8);
-            g.drawString(s, (float) (x - fm.stringWidth(s) / 2.0), (float) (y + fm.getAscent() / 2.0 - 1));
+            g.drawString(text, (float) (x - fm.stringWidth(text) / 2.0), (float) (y + fm.getAscent() / 2.0 - 1));
         }
     }
 
@@ -795,6 +989,10 @@ public class FloydWarshallGUI extends JFrame {
     // =====================================================================
     static final class FloydWarshall {
 
+        /**
+         * Runs the algorithm on {@code g}.
+         * @param record when true (and n <= DISPLAY_LIMIT) a snapshot and log are kept for every pass
+         */
         static Result run(Graph g, boolean record) {
             int n = g.vertexCount();
             Result r = new Result();
@@ -814,19 +1012,24 @@ public class FloydWarshallGUI extends JFrame {
             r.dist = dist;
             r.next = next;
 
-            boolean rec = record && n <= DISPLAY_LIMIT;
-            if (rec) snapshot(r, dist, "Initial matrix D(-1): direct edges only (diagonal 0, \u221E = no edge).");
+            boolean recording = record && n <= DISPLAY_LIMIT;
+            if (recording) {
+                recordInitialSnapshot(r, dist, "Initial matrix D(-1): direct edges only (diagonal 0, \u221E = no edge).");
+            }
 
-            int bad = firstNegativeDiagonal(dist);
-            if (bad >= 0) {
-                markNegative(r, bad, dist[bad][bad], -1);
+            // A negative self-loop already shows up as a negative diagonal entry.
+            int negativeVertex = firstNegativeDiagonal(dist);
+            if (negativeVertex >= 0) {
+                markNegativeCycle(r, negativeVertex, dist[negativeVertex][negativeVertex], -1);
                 return r;
             }
 
+            // Main triple loop: k = intermediate vertex, (i, j) = every pair.
             for (int k = 0; k < n; k++) {
-                ArrayList<String> lines = new ArrayList<>();
-                if (rec) lines.add("Pass k = " + k + ": can routing through vertex " + k + " shorten any path?");
+                ArrayList<String> passLines = new ArrayList<>();
+                if (recording) passLines.add("Pass k = " + k + ": can routing through vertex " + k + " shorten any path?");
                 long passUpdates = 0;
+
                 for (int i = 0; i < n; i++) {
                     long distIK = dist[i][k];
                     if (distIK == INF) continue;          // i cannot reach k, so k cannot help i
@@ -836,8 +1039,8 @@ public class FloydWarshallGUI extends JFrame {
                         r.evaluated++;
                         long viaK = dist[i][k] + distKJ;  // re-read dist[i][k]: it may change when i == k
                         if (viaK < dist[i][j]) {
-                            if (rec) {
-                                lines.add("  dist[" + i + "][" + j + "]: " + cell(dist[i][j]) + " -> " + viaK
+                            if (recording) {
+                                passLines.add("  dist[" + i + "][" + j + "]: " + formatDistance(dist[i][j]) + " -> " + viaK
                                         + "   (" + i + "->" + k + " costs " + dist[i][k] + ", "
                                         + k + "->" + j + " costs " + distKJ + ")");
                             }
@@ -848,47 +1051,55 @@ public class FloydWarshallGUI extends JFrame {
                     }
                 }
                 r.updates += passUpdates;
-                if (rec) {
-                    if (passUpdates == 0) lines.add("  (no improvements in this pass)");
+
+                if (recording) {
+                    if (passUpdates == 0) passLines.add("  (no improvements in this pass)");
                     r.snapshots.add(copy(dist));
-                    r.passLogs.add(lines);
+                    r.passLogs.add(passLines);
                 }
+
                 // NEGATIVE-CYCLE CHECK after every pass (also keeps values small: no overflow).
-                int neg = firstNegativeDiagonal(dist);
-                if (neg >= 0) {
-                    markNegative(r, neg, dist[neg][neg], k);
-                    if (rec) r.passLogs.get(r.passLogs.size() - 1)
-                            .add("!!! NEGATIVE CYCLE: dist[" + neg + "][" + neg + "] = " + dist[neg][neg] + " < 0");
+                int negative = firstNegativeDiagonal(dist);
+                if (negative >= 0) {
+                    markNegativeCycle(r, negative, dist[negative][negative], k);
+                    if (recording) r.passLogs.get(r.passLogs.size() - 1)
+                            .add("!!! NEGATIVE CYCLE: dist[" + negative + "][" + negative + "] = " + dist[negative][negative] + " < 0");
                     return r;
                 }
             }
+
+            appendSuccessSummary(r, n);
+            return r;
+        }
+
+        private static void appendSuccessSummary(Result r, int n) {
             r.log.append("\nFinished. No negative cycle detected.\n");
             r.log.append("Statistics: candidate sums evaluated = ").append(r.evaluated).append(" of n^3 = ")
                     .append(String.format("%.0f", Math.pow(n, 3))).append(" possible; shorter routes found = ")
                     .append(r.updates).append('\n');
             r.log.append("Complexity: time O(V^3), space O(V^2).\n");
-            return r;
         }
 
-        private static void snapshot(Result r, long[][] dist, String line) {
+        private static void recordInitialSnapshot(Result r, long[][] dist, String line) {
             r.snapshots.add(copy(dist));
-            ArrayList<String> l = new ArrayList<>();
-            l.add(line);
-            r.passLogs.add(l);
+            ArrayList<String> lines = new ArrayList<>();
+            lines.add(line);
+            r.passLogs.add(lines);
         }
 
-        private static long[][] copy(long[][] m) {
-            long[][] c = new long[m.length][];
-            for (int i = 0; i < m.length; i++) c[i] = m[i].clone();
-            return c;
+        private static long[][] copy(long[][] matrix) {
+            long[][] copy = new long[matrix.length][];
+            for (int i = 0; i < matrix.length; i++) copy[i] = matrix[i].clone();
+            return copy;
         }
 
+        /** @return the first vertex whose distance to itself is negative, or -1 if none. */
         private static int firstNegativeDiagonal(long[][] dist) {
             for (int i = 0; i < dist.length; i++) if (dist[i][i] < 0) return i;
             return -1;
         }
 
-        private static void markNegative(Result r, int vertex, long value, int pass) {
+        private static void markNegativeCycle(Result r, int vertex, long value, int pass) {
             r.negativeCycle = true;
             r.cycleVertex = vertex;
             r.detectedAtPass = pass;
@@ -901,17 +1112,21 @@ public class FloydWarshallGUI extends JFrame {
         }
     }
 
-    private static String cell(long v) { return v == INF ? "INF" : Long.toString(v); }
+    private static String formatDistance(long value) {
+        return value == INF ? "INF" : Long.toString(value);
+    }
 
     // =====================================================================
     //  PATH RECONSTRUCTION
     // =====================================================================
+
+    /** @return the vertices of the shortest from -> to path, or an empty list if unreachable. */
     static ArrayList<Integer> pathVertices(Result r, int from, int to) {
         ArrayList<Integer> path = new ArrayList<>();
         if (r.dist[from][to] == INF) return path;
         int current = from;
         path.add(current);
-        int guard = 0;
+        int guard = 0;   // safety net against an endless loop
         while (current != to && guard++ <= r.dist.length) {
             current = r.next[current][to];
             path.add(current);
@@ -919,21 +1134,23 @@ public class FloydWarshallGUI extends JFrame {
         return path;
     }
 
+    /** @return a one-line description such as "Path 1 -> 2: cost 3, path: 1 -(4)-> 0 -(-2)-> 2". */
     static String describePath(Result r, Graph g, int from, int to) {
-        long d = r.dist[from][to];
-        if (d == INF) return "Path " + from + " -> " + to + ": UNREACHABLE (no path exists)";
+        long distance = r.dist[from][to];
+        if (distance == INF) return "Path " + from + " -> " + to + ": UNREACHABLE (no path exists)";
         if (from == to) return "Path " + from + " -> " + to + ": cost 0, path: " + from;
-        StringBuilder sb = new StringBuilder();
+
+        StringBuilder route = new StringBuilder();
         int current = from;
-        sb.append(current);
-        int guard = 0;
+        route.append(current);
+        int guard = 0;   // safety net against an endless loop
         while (current != to && guard++ <= r.dist.length) {
             int step = r.next[current][to];
-            long w = g.getWeight(current, step);
-            sb.append(" -(").append(w).append(")-> ").append(step);
+            long weight = g.getWeight(current, step);
+            route.append(" -(").append(weight).append(")-> ").append(step);
             current = step;
         }
-        return "Path " + from + " -> " + to + ": cost " + d + ", path: " + sb;
+        return "Path " + from + " -> " + to + ": cost " + distance + ", path: " + route;
     }
 
     // =====================================================================
@@ -992,6 +1209,7 @@ public class FloydWarshallGUI extends JFrame {
             return false;
         }
 
+        /** @return true if the edge existed and was removed. */
         boolean removeEdge(int from, int to) {
             for (int i = 0; i < edges.size(); i++) {
                 Edge e = edges.get(i);
@@ -1003,11 +1221,13 @@ public class FloydWarshallGUI extends JFrame {
             return false;
         }
 
+        /** @return the weight of edge (from, to), or INF if there is no such edge. */
         long getWeight(int from, int to) {
             for (Edge e : edges) if (e.from == from && e.to == to) return e.weight;
             return INF;
         }
 
+        /** Initial distance matrix: 0 on the diagonal, INF where there is no edge. */
         long[][] toDistanceMatrix() {
             long[][] d = new long[vertexCount][vertexCount];
             for (int i = 0; i < vertexCount; i++)
@@ -1019,14 +1239,15 @@ public class FloydWarshallGUI extends JFrame {
             return d;
         }
 
-        private void checkVertex(int v, String role) {
-            if (v < 0 || v >= vertexCount) {
-                throw new IllegalArgumentException(role + " vertex " + v + " is out of range (valid: 0.."
+        private void checkVertex(int vertex, String role) {
+            if (vertex < 0 || vertex >= vertexCount) {
+                throw new IllegalArgumentException(role + " vertex " + vertex + " is out of range (valid: 0.."
                         + (vertexCount - 1) + ").");
             }
         }
     }
 
+    /** Everything produced by one run of the algorithm. */
     static final class Result {
         long[][] dist = new long[0][0];
         int[][] next = new int[0][0];
@@ -1059,7 +1280,8 @@ public class FloydWarshallGUI extends JFrame {
         }
     }
 
-    private static long[] e(int from, int to, long weight) { return new long[]{from, to, weight}; }
+    /** Shorthand for an edge description used by {@link #buildGraph}. */
+    private static long[] edge(int from, int to, long weight) { return new long[]{from, to, weight}; }
 
     private static Graph buildGraph(int n, long[]... edgeSpecs) {
         Graph g = new Graph(n);
@@ -1068,61 +1290,71 @@ public class FloydWarshallGUI extends JFrame {
     }
 
     static ArrayList<TestCase> buildSuite() {
-        ArrayList<TestCase> s = new ArrayList<>();
-        s.add(new TestCase("NORMAL - classic 4-vertex graph with negative edges",
+        ArrayList<TestCase> suite = new ArrayList<>();
+
+        // ---- normal cases ----
+        suite.add(new TestCase("NORMAL - classic 4-vertex graph with negative edges",
                 "Negative weights without a cycle; several paths improve via intermediates.",
-                buildGraph(4, e(0, 2, -2), e(1, 0, 4), e(1, 2, 3), e(2, 3, 2), e(3, 1, -1)),
+                buildGraph(4, edge(0, 2, -2), edge(1, 0, 4), edge(1, 2, 3), edge(2, 3, 2), edge(3, 1, -1)),
                 new long[][]{{0, -1, -2, 0}, {4, 0, 2, 4}, {5, 1, 0, 2}, {3, -1, 1, 0}}, false));
-        s.add(new TestCase("NORMAL - symmetric (undirected-style) triangle",
+        suite.add(new TestCase("NORMAL - symmetric (undirected-style) triangle",
                 "Both directions added; 0->2 should drop from 7 to 5 by going through vertex 1.",
-                buildGraph(3, e(0, 1, 4), e(1, 0, 4), e(1, 2, 1), e(2, 1, 1), e(0, 2, 7), e(2, 0, 7)),
+                buildGraph(3, edge(0, 1, 4), edge(1, 0, 4), edge(1, 2, 1), edge(2, 1, 1), edge(0, 2, 7), edge(2, 0, 7)),
                 new long[][]{{0, 4, 5}, {4, 0, 1}, {5, 1, 0}}, false));
-        s.add(new TestCase("BOUNDARY - single vertex, no edges",
+
+        // ---- boundary cases ----
+        suite.add(new TestCase("BOUNDARY - single vertex, no edges",
                 "Smallest non-empty graph; the answer is [[0]].",
                 buildGraph(1), new long[][]{{0}}, false));
-        s.add(new TestCase("BOUNDARY - empty graph (0 vertices)",
+        suite.add(new TestCase("BOUNDARY - empty graph (0 vertices)",
                 "Empty structure: the algorithm must exit cleanly without touching any matrix.",
                 buildGraph(0), new long[0][0], false));
-        s.add(new TestCase("BOUNDARY - 3 vertices, no edges",
+        suite.add(new TestCase("BOUNDARY - 3 vertices, no edges",
                 "Every off-diagonal distance must remain INF.",
                 buildGraph(3), new long[][]{{0, INF, INF}, {INF, 0, INF}, {INF, INF, 0}}, false));
-        s.add(new TestCase("BOUNDARY - disconnected components",
+        suite.add(new TestCase("BOUNDARY - disconnected components",
                 "{0,1} and {2,3} cannot reach each other; INF must survive every pass.",
-                buildGraph(4, e(0, 1, 5), e(1, 0, 2), e(2, 3, 1)),
+                buildGraph(4, edge(0, 1, 5), edge(1, 0, 2), edge(2, 3, 1)),
                 new long[][]{{0, 5, INF, INF}, {2, 0, INF, INF}, {INF, INF, 0, 1}, {INF, INF, INF, 0}}, false));
-        s.add(new TestCase("BOUNDARY - duplicate edge overwrites",
+        suite.add(new TestCase("BOUNDARY - duplicate edge overwrites",
                 "Edge 0->1 is entered twice (8 then 3); the second weight replaces the first.",
-                buildGraph(3, e(0, 1, 8), e(0, 1, 3), e(1, 2, 1)),
+                buildGraph(3, edge(0, 1, 8), edge(0, 1, 3), edge(1, 2, 1)),
                 new long[][]{{0, 3, 4}, {INF, 0, 1}, {INF, INF, 0}}, false));
-        s.add(new TestCase("BOUNDARY - positive self-loop ignored",
+        suite.add(new TestCase("BOUNDARY - positive self-loop ignored",
                 "A self-loop of +5 can never shorten anything; distance to self stays 0.",
-                buildGraph(2, e(0, 0, 5), e(0, 1, 2)),
+                buildGraph(2, edge(0, 0, 5), edge(0, 1, 2)),
                 new long[][]{{0, 2}, {INF, 0}}, false));
-        s.add(new TestCase("INVALID DOMAIN - negative cycle (0->1->2->0, total -1)",
+
+        // ---- invalid-domain cases (negative cycles) ----
+        suite.add(new TestCase("INVALID DOMAIN - negative cycle (0->1->2->0, total -1)",
                 "Must be DETECTED and reported, not silently wrong.",
-                buildGraph(3, e(0, 1, 1), e(1, 2, -3), e(2, 0, 1)), null, true));
-        s.add(new TestCase("INVALID DOMAIN - negative self-loop",
+                buildGraph(3, edge(0, 1, 1), edge(1, 2, -3), edge(2, 0, 1)), null, true));
+        suite.add(new TestCase("INVALID DOMAIN - negative self-loop",
                 "A one-vertex negative cycle is caught before pass 0 even starts.",
-                buildGraph(2, e(1, 1, -1), e(0, 1, 3)), null, true));
-        return s;
+                buildGraph(2, edge(1, 1, -1), edge(0, 1, 3)), null, true));
+        return suite;
     }
 
     static String runAllTestsReport() {
         StringBuilder sb = new StringBuilder();
         ArrayList<TestCase> suite = buildSuite();
         int passed = 0;
-        for (TestCase tc : suite) {
-            Result r = FloydWarshall.run(tc.graph, false);
-            boolean pass = tc.expectNegativeCycle ? r.negativeCycle
-                    : (!r.negativeCycle && sameMatrix(r.dist, tc.expected));
+
+        for (TestCase testCase : suite) {
+            Result r = FloydWarshall.run(testCase.graph, false);
+            boolean pass = testCase.expectNegativeCycle
+                    ? r.negativeCycle
+                    : (!r.negativeCycle && sameMatrix(r.dist, testCase.expected));
             if (pass) passed++;
-            sb.append(pass ? "PASS  " : "FAIL  ").append(tc.name).append('\n');
-            sb.append("      ").append(tc.purpose).append('\n');
+            sb.append(pass ? "PASS  " : "FAIL  ").append(testCase.name).append('\n');
+            sb.append("      ").append(testCase.purpose).append('\n');
         }
+
         sb.append('\n').append("INVALID INPUT validation demo:\n");
-        boolean ok = runInvalidInputDemo(sb);
-        sb.append(ok ? "PASS  " : "FAIL  ").append("Invalid input rejected\n");
-        if (ok) passed++;
+        boolean invalidInputOk = runInvalidInputDemo(sb);
+        sb.append(invalidInputOk ? "PASS  " : "FAIL  ").append("Invalid input rejected\n");
+        if (invalidInputOk) passed++;
+
         int total = suite.size() + 1;
         sb.append("\n=============== SUITE SUMMARY: ").append(passed).append(" / ").append(total)
                 .append(" PASSED ===============\n");
@@ -1133,16 +1365,17 @@ public class FloydWarshallGUI extends JFrame {
     static boolean runInvalidInputDemo(StringBuilder out) {
         out.append("Each of the following must be REJECTED with a clear message:\n");
         final Graph g = new Graph(3);
-        boolean ok = true;
-        ok &= expectRejected(out, "Create graph with -5 vertices", () -> new Graph(-5));
-        ok &= expectRejected(out, "Edge 0 -> 7 in a 3-vertex graph (target out of range)", () -> g.addOrUpdateEdge(0, 7, 1));
-        ok &= expectRejected(out, "Edge -1 -> 1 (negative source vertex)", () -> g.addOrUpdateEdge(-1, 1, 1));
-        ok &= expectRejected(out, "Edge 0 -> 1 with weight 5,000,000,000 (overflow risk)",
+        boolean allRejected = true;
+        allRejected &= expectRejected(out, "Create graph with -5 vertices", () -> new Graph(-5));
+        allRejected &= expectRejected(out, "Edge 0 -> 7 in a 3-vertex graph (target out of range)", () -> g.addOrUpdateEdge(0, 7, 1));
+        allRejected &= expectRejected(out, "Edge -1 -> 1 (negative source vertex)", () -> g.addOrUpdateEdge(-1, 1, 1));
+        allRejected &= expectRejected(out, "Edge 0 -> 1 with weight 5,000,000,000 (overflow risk)",
                 () -> g.addOrUpdateEdge(0, 1, 5_000_000_000L));
+
         boolean removedGhost = g.removeEdge(0, 1);
         out.append("  - Remove non-existent edge 0 -> 1: ")
                 .append(removedGhost ? "NOT handled" : "handled, nothing changed").append('\n');
-        return ok && !removedGhost;
+        return allRejected && !removedGhost;
     }
 
     private static boolean expectRejected(StringBuilder out, String label, Runnable action) {
