@@ -1,4 +1,3 @@
-
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
@@ -83,6 +82,23 @@ public class MainMenu extends JFrame {
      */
     private JPanel createModulePanel(ModuleInfo info) {
         switch (info.key) {
+            case "CPU_SCHEDULING":
+                return new CPUSchedulingPanel();
+            case "BANKERS":
+                return new BankersAlgorithmPanel();
+            case "PAGING":
+                return new PagingPanel();
+            case "PAGE_REPLACEMENT":
+                return new PageReplacementPanel();
+            case "SEGMENTATION":
+                return new SegmentationPanel();
+              
+            case "FRAGMENTATION":
+                return new FragmentationPanel();
+             case "DISK_SCHEDULING":
+                return new DiskSchedulingPanel();
+            case "MULTIPROGRAMMING":
+                return new MultiprogrammingPanel();
             default:
                 return createNotBuiltYetPanel(info);
         }
