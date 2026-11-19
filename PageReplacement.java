@@ -2,7 +2,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Page replacement algorithms: FIFO, LRU and Optimal.
+ * Page replacement algorithms: FIFO, LRU, Optimal, Second Chance and LFU.
  *
  * This class contains no GUI code. Each algorithm returns a {@link Result} with one
  * {@link Step} per page reference, so a GUI can show every frame change.
@@ -13,9 +13,12 @@ import java.util.List;
  *  - When every frame is full the algorithm picks a victim frame:
  *      FIFO    - the page that has been in memory the longest,
  *      LRU     - the page that was used least recently,
- *      Optimal - the page whose next use is farthest in the future (a page that is
- *                never used again counts as infinitely far; ties go to the page
- *                that was loaded earliest).
+ *      Optimal       - the page whose next use is farthest in the future (a page that is
+ *                      never used again counts as infinitely far; ties go to the page
+ *                      that was loaded earliest),
+ *      Second Chance - the clock algorithm, using a reference bit and circular hand,
+ *      LFU           - the page with the fewest references while resident (ties go to
+ *                      the page that was loaded earliest).
  */
 public class PageReplacement {
 
@@ -139,7 +142,8 @@ public class PageReplacement {
 
     /** Chooses which full frame to overwrite. */
     private interface VictimChooser {
-        int choose(int position, int[] slots, int[] loadTime, int[] lastUse, List<Integer> references);
+        int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
+                   int[] frequencies, int[] referenceBits, List<Integer> references);
     }
 
     // ------------------------------------------------------------------
@@ -151,7 +155,7 @@ public class PageReplacement {
         return simulate("FIFO", references, frameCount, new VictimChooser() {
             @Override
             public int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
-                              List<Integer> refs) {
+                              int[] frequencies, int[] referenceBits, List<Integer> refs) {
                 int victim = 0;
                 for (int i = 1; i < slots.length; i++) {
                     if (loadTime[i] < loadTime[victim]) {
@@ -168,7 +172,7 @@ public class PageReplacement {
         return simulate("LRU", references, frameCount, new VictimChooser() {
             @Override
             public int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
-                              List<Integer> refs) {
+                              int[] frequencies, int[] referenceBits, List<Integer> refs) {
                 int victim = 0;
                 for (int i = 1; i < slots.length; i++) {
                     if (lastUse[i] < lastUse[victim]) {
@@ -185,7 +189,7 @@ public class PageReplacement {
         return simulate("Optimal", references, frameCount, new VictimChooser() {
             @Override
             public int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
-                              List<Integer> refs) {
+                              int[] frequencies, int[] referenceBits, List<Integer> refs) {
                 int victim = -1;
                 int victimNext = -1;
                 for (int i = 0; i < slots.length; i++) {
@@ -202,12 +206,51 @@ public class PageReplacement {
         });
     }
 
-    /** Runs FIFO, LRU and Optimal on the same input, in that order. */
+    /** Second Chance (Clock): skip recently referenced pages once before replacing them. */
+    public static Result secondChance(List<Integer> references, int frameCount) {
+        final int[] hand = {0};
+        return simulate("Second Chance (Clock)", references, frameCount, new VictimChooser() {
+            @Override
+            public int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
+                              int[] frequencies, int[] referenceBits, List<Integer> refs) {
+                while (referenceBits[hand[0]] != 0) {
+                    referenceBits[hand[0]] = 0;
+                    hand[0] = (hand[0] + 1) % slots.length;
+                }
+                int victim = hand[0];
+                hand[0] = (hand[0] + 1) % slots.length;
+                return victim;
+            }
+        });
+    }
+
+    /** Least Frequently Used: replace the page with the fewest references while resident. */
+    public static Result lfu(List<Integer> references, int frameCount) {
+        return simulate("LFU", references, frameCount, new VictimChooser() {
+            @Override
+            public int choose(int position, int[] slots, int[] loadTime, int[] lastUse,
+                              int[] frequencies, int[] referenceBits, List<Integer> refs) {
+                int victim = 0;
+                for (int i = 1; i < slots.length; i++) {
+                    if (frequencies[i] < frequencies[victim]
+                            || (frequencies[i] == frequencies[victim]
+                            && loadTime[i] < loadTime[victim])) {
+                        victim = i;
+                    }
+                }
+                return victim;
+            }
+        });
+    }
+
+    /** Runs all supported algorithms on the same input. */
     public static List<Result> compareAll(List<Integer> references, int frameCount) {
         List<Result> results = new ArrayList<Result>();
         results.add(fifo(references, frameCount));
         results.add(lru(references, frameCount));
         results.add(optimal(references, frameCount));
+        results.add(secondChance(references, frameCount));
+        results.add(lfu(references, frameCount));
         return results;
     }
 
@@ -223,6 +266,8 @@ public class PageReplacement {
         int[] slots = new int[frameCount];
         int[] loadTime = new int[frameCount];
         int[] lastUse = new int[frameCount];
+        int[] frequencies = new int[frameCount];
+        int[] referenceBits = new int[frameCount];
         for (int i = 0; i < frameCount; i++) {
             slots[i] = EMPTY;
         }
@@ -249,6 +294,8 @@ public class PageReplacement {
             if (hit) {
                 hits++;
                 lastUse[found] = pos;
+                frequencies[found]++;
+                referenceBits[found] = 1;
             } else {
                 faults++;
                 int target = -1;
@@ -259,12 +306,15 @@ public class PageReplacement {
                     }
                 }
                 if (target < 0) {
-                    target = chooser.choose(pos, slots, loadTime, lastUse, references);
+                    target = chooser.choose(pos, slots, loadTime, lastUse, frequencies,
+                            referenceBits, references);
                     replaced = slots[target];
                 }
                 slots[target] = page;
                 loadTime[target] = pos;
                 lastUse[target] = pos;
+                frequencies[target] = 1;
+                referenceBits[target] = 1;
                 changed = target;
             }
 

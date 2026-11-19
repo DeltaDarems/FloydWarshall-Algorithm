@@ -40,6 +40,7 @@ public class CPUSchedulingPanel extends JPanel {
 
     private static final String ALGO_FCFS = "FCFS (First Come First Serve)";
     private static final String ALGO_SJF = "SJF (Non-preemptive)";
+    private static final String ALGO_SRTF = "SRTF (Preemptive)";
     private static final String ALGO_PRIORITY = "Priority (Non-preemptive)";
     private static final String ALGO_RR = "Round Robin";
 
@@ -52,7 +53,8 @@ public class CPUSchedulingPanel extends JPanel {
     private final JTextField priorityField = UIStyles.createTextField(8);
     private final JTextField quantumField = UIStyles.createTextField(8);
     private final JComboBox<String> algorithmBox =
-            new JComboBox<String>(new String[]{ALGO_FCFS, ALGO_SJF, ALGO_PRIORITY, ALGO_RR});
+            new JComboBox<String>(
+                    new String[]{ALGO_FCFS, ALGO_SJF, ALGO_SRTF, ALGO_PRIORITY, ALGO_RR});
 
     // Tables and result widgets
     private final DefaultTableModel processModel;
@@ -300,6 +302,8 @@ public class CPUSchedulingPanel extends JPanel {
                 result = CPUScheduling.fcfs(processes);
             } else if (ALGO_SJF.equals(selected)) {
                 result = CPUScheduling.sjf(processes);
+            } else if (ALGO_SRTF.equals(selected)) {
+                result = CPUScheduling.srtf(processes);
             } else if (ALGO_PRIORITY.equals(selected)) {
                 result = CPUScheduling.priority(processes);
             } else {

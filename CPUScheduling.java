@@ -7,8 +7,8 @@ import java.util.List;
 import java.util.Queue;
 
 /**
- * CPU scheduling algorithms: FCFS, SJF (non-preemptive), Priority
- * (non-preemptive, lower number = higher priority) and Round Robin.
+ * CPU scheduling algorithms: FCFS, SJF (non-preemptive), SRTF (preemptive),
+ * Priority (non-preemptive, lower number = higher priority) and Round Robin.
  *
  * This class contains no GUI code. Every method works on copies of the
  * given processes, so the caller's list is never modified.
@@ -140,6 +140,59 @@ public class CPUScheduling {
                 return c != 0 ? c : Integer.compare(a.getArrivalTime(), b.getArrivalTime());
             }
         });
+    }
+
+    /** Shortest Remaining Time First: preempt when a shorter job arrives. */
+    public static Result srtf(List<Process> processes) {
+        validate(processes);
+
+        List<Process> work = copyOf(processes);
+        List<GanttEntry> gantt = new ArrayList<GanttEntry>();
+        int time = 0;
+        int finished = 0;
+
+        while (finished < work.size()) {
+            Process best = null;
+            int nextArrival = Integer.MAX_VALUE;
+            boolean hasNextArrival = false;
+            for (Process p : work) {
+                if (p.getRemainingTime() > 0) {
+                    if (p.getArrivalTime() <= time) {
+                        if (best == null || p.getRemainingTime() < best.getRemainingTime()
+                                || (p.getRemainingTime() == best.getRemainingTime()
+                                && p.getArrivalTime() < best.getArrivalTime())) {
+                            best = p;
+                        }
+                    } else {
+                        nextArrival = Math.min(nextArrival, p.getArrivalTime());
+                        hasNextArrival = true;
+                    }
+                }
+            }
+
+            if (best == null) {
+                addGantt(gantt, IDLE, time, nextArrival);
+                time = nextArrival;
+                continue;
+            }
+
+            if (best.getStartTime() < 0) {
+                best.setStartTime(time);
+            }
+
+            int run = hasNextArrival
+                    ? Math.min(best.getRemainingTime(), nextArrival - time)
+                    : best.getRemainingTime();
+            addGantt(gantt, best.getId(), time, time + run);
+            time += run;
+            best.setRemainingTime(best.getRemainingTime() - run);
+            if (best.getRemainingTime() == 0) {
+                finish(best, time);
+                finished++;
+            }
+        }
+
+        return new Result("SRTF (Preemptive)", work, gantt);
     }
 
     /** Priority (non-preemptive): the lowest priority number runs first. */

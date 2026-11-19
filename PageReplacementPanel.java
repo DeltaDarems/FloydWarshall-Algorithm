@@ -34,6 +34,8 @@ public class PageReplacementPanel extends JPanel {
     private static final String ALGO_FIFO = "FIFO";
     private static final String ALGO_LRU = "LRU";
     private static final String ALGO_OPTIMAL = "Optimal";
+    private static final String ALGO_SECOND_CHANCE = "Second Chance (Clock)";
+    private static final String ALGO_LFU = "LFU";
 
     private static final Color CHANGED_COLOR = new Color(0xFFE29A);
 
@@ -41,7 +43,8 @@ public class PageReplacementPanel extends JPanel {
     private final JTextField referenceField = UIStyles.createTextField(32);
     private final JTextField frameField = UIStyles.createTextField(5);
     private final JComboBox<String> algorithmBox =
-            new JComboBox<String>(new String[]{ALGO_FIFO, ALGO_LRU, ALGO_OPTIMAL});
+            new JComboBox<String>(new String[]{
+                    ALGO_FIFO, ALGO_LRU, ALGO_OPTIMAL, ALGO_SECOND_CHANCE, ALGO_LFU});
 
     // Result widgets
     private final DefaultTableModel stepModel = new DefaultTableModel() {
@@ -230,6 +233,10 @@ public class PageReplacementPanel extends JPanel {
             return PageReplacement.fifo(references, frames);
         } else if (ALGO_LRU.equals(name)) {
             return PageReplacement.lru(references, frames);
+        } else if (ALGO_SECOND_CHANCE.equals(name)) {
+            return PageReplacement.secondChance(references, frames);
+        } else if (ALGO_LFU.equals(name)) {
+            return PageReplacement.lfu(references, frames);
         }
         return PageReplacement.optimal(references, frames);
     }
